@@ -1,0 +1,6 @@
+{
+  "name": "RemoteVM Workspace",
+  "description": "Paid remote virtual machine workspace service with real-time session countdown, prominent warnings, secure embedded viewer, and seamless time extensions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
