@@ -363,7 +363,7 @@ export default function RemoteVMApp() {
   }
 
   return (
-    /*<div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-blue-600 selection:text-white flex flex-col">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-blue-600 selection:text-white flex flex-col">
       {currentView === 'landing' ? (
         <main className="flex-1 flex flex-col">
           <LandingHeader
@@ -583,10 +583,7 @@ export default function RemoteVMApp() {
       />
 
       <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
-    </div>*/
-    <main style={{ padding: 40 }}>
-      <h1>Render Test</h1>
-    </main>
+    </div>
   );
   
 }
