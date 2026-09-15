@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import { signOut } from 'next-auth/react';
 import { UserProfile, BillingTransaction } from '@/types/user';
 import { VMSession } from '@/types/workspace';
 import {
@@ -17,6 +18,7 @@ import {
   Check,
   CheckCircle2,
   Zap,
+  LogOut,
 } from 'lucide-react';
 
 interface UserAccountModalProps {
@@ -444,12 +446,24 @@ export function UserAccountModal({
             <span className="w-2 h-2 rounded-full bg-emerald-500" />
             <span>Account synced with Mumbai KVM Cluster</span>
           </div>
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold cursor-pointer transition-colors"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                onClose();
+                signOut();
+              }}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/20 font-semibold cursor-pointer transition-colors"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign out</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="px-4 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold cursor-pointer transition-colors"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     </div>

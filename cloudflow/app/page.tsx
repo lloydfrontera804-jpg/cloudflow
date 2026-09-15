@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { PRICING_PLANS, PricingPlan, VM_SERVICE_CONFIG } from '@/config/vm-service';
-import { VMSession, SessionStatus, SharedFile } from '@/types/workspace';
+import React, { useState, useEffect, useCallback } from 'react';
+import { PRICING_PLANS, PricingPlan } from '@/config/vm-service';
+import { VMSession, SharedFile } from '@/types/workspace';
 import { UserProfile, BillingTransaction } from '@/types/user';
 import { LandingHeader } from '@/components/landing/LandingHeader';
 import { HeroSection } from '@/components/landing/HeroSection';
@@ -17,6 +17,18 @@ import { ExtendPaymentModal } from '@/components/workspace/ExtendPaymentModal';
 import { UserAccountModal } from '@/components/account/UserAccountModal';
 import { HardwareDiagnosticsModal } from '@/components/workspace/HardwareDiagnosticsModal';
 import {
+  fetchSession,
+  startSession,
+  extendSession,
+  fetchTransactions,
+  fetchStats,
+  fetchTunnelHost,
+  debugSession,
+} from '@/lib/api';
+import { useSession } from 'next-auth/react';
+import { AuthModal } from '@/components/auth/AuthModal';
+import { MachineSelector } from '@/components/MachineSelector';
+import {
   Terminal,
   Shield,
   ArrowRight,
@@ -24,20 +36,65 @@ import {
   Activity,
 } from 'lucide-react';
 
-export default function RemoteVMApp() {
-  // Navigation view: 'landing' | 'workspace'
-  const [currentView, setCurrentView] = useState<'landing' | 'workspace'>('landing');
+// UserAccountModal and HardwareDiagnosticsModal (not files I have access to
+// edit) both type their session-related props as required/non-nullable —
+// left over from the days when `session` was always a hardcoded fake
+// object. Real session state can genuinely be null now (no session started
+// yet), so this placeholder stands in rather than casting past the type
+// checker with `as VMSession`. Ideally these two components' prop types
+// should just become optional and handle the "no session" case themselves.
+const NO_ACTIVE_SESSION_PLACEHOLDER: VMSession = {
+  id: 'no-active-session',
+  plan: PRICING_PLANS[0],
+  status: 'expired',
+  startedAt: 0,
+  totalDurationSeconds: 0,
+  remainingSeconds: 0,
+  extensionCount: 0,
+  ipAddress: '',
+  region: '',
+  vmName: '',
+};
 
-  // User Account Details State
+// Poll interval for session state. Backend is source of truth now — this
+// just refreshes the local mirror of it. 3s keeps the countdown feeling live
+// without hammering a free Render instance.
+const SESSION_POLL_MS = 3000;
+
+export default function RemoteVMApp() {
+  const [currentView, setCurrentView] = useState<'landing' | 'machine-select' | 'workspace'>('landing');
+
+  // Real Google/email identity — see auth.ts. `authStatus` is
+  // 'loading' | 'authenticated' | 'unauthenticated'.
+  const { data: authData, status: authStatus } = useSession();
+  const isSignedIn = authStatus === 'authenticated' && !!authData?.user?.email;
+  const userEmail = authData?.user?.email;
+
+  // Which physical laptop the classmate is currently renting. Everything
+  // session/tunnel-related below is now scoped to this — null means "no
+  // machine chosen yet," which routes to the MachineSelector screen.
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
+
+  // Email/password sign-in requires actual typed input, unlike a redirect
+  // flow — there's nothing to programmatically trigger. Instead, open the
+  // real AuthModal so whoever tried to start a session without signing in
+  // can do so right there.
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const promptSignIn = () => setIsAuthModalOpen(true);
+
+  // name/email below now get overwritten by the real signed-in identity once
+  // available (see the useEffect further down). joinedDate/accountTier/
+  // security/vmCredentials are still decorative placeholders — real
+  // per-user tracking of those specifically hasn't been built.
   const [userProfile, setUserProfile] = useState<UserProfile>({
     id: 'usr_c79f4a12',
     name: 'Polite Cyber Gamer',
     email: 'politecybergamer@gmail.com',
     joinedDate: 'September 2026',
     accountTier: 'Tier-IV Dedicated Cloud',
-    totalSessionsCompleted: 14,
-    totalHoursUsed: 28,
-    totalSpentInr: 1400,
+    totalSessionsCompleted: 0,
+    totalHoursUsed: 0,
+    totalSpentInr: 0,
     security: {
       twoFactorEnabled: true,
       sshKeyConfigured: true,
@@ -52,68 +109,46 @@ export default function RemoteVMApp() {
     },
   });
 
-  // Transaction History State
-  const [transactions, setTransactions] = useState<BillingTransaction[]>([
-    {
-      id: 'TXN-9428B71',
-      date: 'Today, 20:52 IST',
-      description: 'Starter Workspace (2 Hours @ ₹50/h)',
-      amountInr: 100,
-      hoursAdded: 2,
-      paymentMethod: 'UPI (Google Pay)',
-      status: 'completed',
-      invoiceNumber: 'INV-2026-09-8812',
-    },
-    {
-      id: 'TXN-7182C40',
-      date: 'Yesterday, 18:30 IST',
-      description: 'Workspace Extension (2 Hours @ ₹50/h)',
-      amountInr: 100,
-      hoursAdded: 2,
-      paymentMethod: 'Card (Visa ending 8821)',
-      status: 'completed',
-      invoiceNumber: 'INV-2026-09-8794',
-    },
-  ]);
+  // Once a real signed-in identity exists, overwrite the placeholder name/email
+  // and dismiss the auth modal if it happened to be open.
+  useEffect(() => {
+    if (authData?.user?.email) {
+      setUserProfile((prev) => ({
+        ...prev,
+        name: authData.user.name || prev.name,
+        email: authData.user.email,
+      }));
+      setIsAuthModalOpen(false);
+    }
+  }, [authData]);
 
-  // Account Modal Open State
+  // Transaction history now comes from the backend (real log of actual
+  // start/extend calls) instead of a hardcoded fake array. Still no real
+  // payment gateway behind it — see roadmap item 2 — but it's no longer
+  // fictional data disconnected from what actually happened.
+  const [transactions, setTransactions] = useState<BillingTransaction[]>([]);
+
   const [isAccountOpen, setIsAccountOpen] = useState(false);
 
-  // Active Session State
-  const [session, setSession] = useState<VMSession>(() => {
-    const defaultPlan = PRICING_PLANS[0]; // ₹100 for 2 hours
-    return {
-      id: 'session-live-01',
-      plan: defaultPlan,
-      status: 'active',
-      startedAt: Date.now(),
-      totalDurationSeconds: defaultPlan.durationSeconds, // 7200s
-      remainingSeconds: defaultPlan.durationSeconds, // 7200s (2 hours)
-      extensionCount: 0,
-      ipAddress: '143.244.138.92',
-      region: 'Mumbai, India (ap-south-1)',
-      vmName: 'cloud-vm-mumbai-01',
-    };
-  });
+  // Session now lives on the backend. null = no session yet (fresh visitor).
+  const [session, setSession] = useState<VMSession | null>(null);
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
 
-  // Timer speed multiplier (1x, 10x, 60x for testing)
-  const [speedMultiplier, setSpeedMultiplier] = useState(1);
+  // Where the real laptop's VNC tunnel currently lives. Fetched at runtime
+  // from the backend (see /api/tunnel-host) rather than baked into a
+  // NEXT_PUBLIC_ build-time env var, since that can't change without a
+  // full redeploy and the tunnel hostname can rotate.
+  const [vncHost, setVncHost] = useState<string | null>(null);
 
-  // Payment Modal State
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isInitialPurchase, setIsInitialPurchase] = useState(false);
   const [pendingPlan, setPendingPlan] = useState<PricingPlan>(PRICING_PLANS[0]);
 
-  // Diagnostics Modal State
   const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
-
-  // Disclaimer agreement state
   const [disclaimerAgreed, setDisclaimerAgreed] = useState(false);
-
-  // Workspace Sidebar Tab: 'files' | 'disclaimer'
   const [sidebarTab, setSidebarTab] = useState<'files' | 'disclaimer'>('files');
 
-  // Shared Ephemeral Files State
+  // Shared files remain local/fake for now — out of scope for this pass.
   const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([
     {
       id: 'file-init-1',
@@ -133,144 +168,176 @@ export default function RemoteVMApp() {
     },
   ]);
 
-  // Real-time Session Countdown Tick
+  const refreshSession = useCallback(async () => {
+    if (!selectedMachineId) {
+      setIsSessionLoading(false);
+      return;
+    }
+    try {
+      const { session: s } = await fetchSession(selectedMachineId);
+      setSession(s);
+    } catch (err) {
+      console.error('Failed to fetch session', err);
+    } finally {
+      setIsSessionLoading(false);
+    }
+  }, [selectedMachineId]);
+
+  const refreshTransactionsAndStats = useCallback(async () => {
+    try {
+      const [{ transactions: txns }, stats] = await Promise.all([
+        fetchTransactions(userEmail),
+        fetchStats(userEmail),
+      ]);
+      setTransactions(txns);
+      setUserProfile((prev) => ({
+        ...prev,
+        totalSessionsCompleted: stats.totalSessionsCompleted,
+        totalHoursUsed: stats.totalHoursUsed,
+        totalSpentInr: stats.totalSpentInr,
+      }));
+    } catch (err) {
+      console.error('Failed to fetch transactions/stats', err);
+    }
+  }, [userEmail]);
+
+  // Initial load + whenever the selected machine changes.
   useEffect(() => {
-    if (session.remainingSeconds <= 0) return;
+    refreshSession();
+    refreshTransactionsAndStats();
+    if (selectedMachineId) {
+      fetchTunnelHost(selectedMachineId)
+        .then(({ host }) => setVncHost(host))
+        .catch((err) => console.error('Failed to fetch tunnel host', err));
+    } else {
+      setVncHost(null);
+    }
+  }, [refreshSession, refreshTransactionsAndStats, selectedMachineId]);
 
-    const interval = setInterval(() => {
-      setSession((prev) => {
-        if (prev.remainingSeconds <= 0) {
-          if (prev.status !== 'expired') {
-            return { ...prev, remainingSeconds: 0, status: 'expired' };
-          }
-          return prev;
-        }
-
-        const nextSeconds = Math.max(0, prev.remainingSeconds - speedMultiplier);
-        let nextStatus = prev.status;
-
-        if (nextSeconds === 0) {
-          nextStatus = 'expired';
-        } else if (nextSeconds <= VM_SERVICE_CONFIG.warningThresholdSeconds) {
-          // Exactly 5 minutes (300 seconds) or less
-          nextStatus = 'warning';
-        } else if (prev.extensionCount > 0) {
-          nextStatus = 'extended';
-        } else {
-          nextStatus = 'active';
-        }
-
-        return {
-          ...prev,
-          remainingSeconds: nextSeconds,
-          status: nextStatus,
-        };
-      });
-    }, 1000);
-
+  // Poll the backend for session state. This replaces the old local
+  // setInterval that decremented remainingSeconds in the browser — the
+  // backend now owns the countdown via a stored expiresAt timestamp, and
+  // the frontend just mirrors it. Paused entirely while no machine is
+  // selected — nothing to poll yet.
+  useEffect(() => {
+    if (!selectedMachineId) return;
+    const interval = setInterval(refreshSession, SESSION_POLL_MS);
     return () => clearInterval(interval);
-  }, [speedMultiplier, session.remainingSeconds]);
+  }, [refreshSession, selectedMachineId]);
 
-  // Handlers for Plan Selection and Starting Session
+  // Starting or extending now requires a real, allow-listed sign-in AND a
+  // chosen machine. The backend enforces both too (401 without a valid
+  // session, 400 without a machineId) — this client-side check just avoids
+  // opening a payment modal for someone about to get rejected anyway.
   const handleSelectPlanFromLanding = (plan: PricingPlan) => {
+    if (!isSignedIn) return promptSignIn();
     setPendingPlan(plan);
     setIsInitialPurchase(true);
+    if (!selectedMachineId) {
+      setCurrentView('machine-select');
+      return;
+    }
     setIsPaymentOpen(true);
   };
 
   const handleStartSessionDirect = () => {
-    setPendingPlan(PRICING_PLANS[0]); // ₹100 for 2 hours
+    if (!isSignedIn) return promptSignIn();
+    setPendingPlan(PRICING_PLANS[0]);
     setIsInitialPurchase(true);
+    if (!selectedMachineId) {
+      setCurrentView('machine-select');
+      return;
+    }
     setIsPaymentOpen(true);
   };
 
-  const handlePaymentSuccess = (addedSeconds: number, plan: PricingPlan) => {
+  // Called once a machine is actually picked, whether that happened via the
+  // "no machine yet" redirect above, or from the explicit "Switch machine"
+  // button in the workspace.
+  const handleMachineSelected = (machineId: string) => {
+    setSelectedMachineId(machineId);
+    setIsSessionLoading(true);
+    if (isInitialPurchase) {
+      // Was on the way to starting a NEW session — proceed to payment now
+      // that a machine is chosen.
+      setIsPaymentOpen(true);
+      setCurrentView('workspace');
+    } else {
+      // Was just switching machines to check on/manage an existing rental.
+      setCurrentView('workspace');
+    }
+  };
+
+  // Payment is still simulated (no real gateway wired in yet — roadmap item
+  // 2) but the *session and transaction effects* of a "successful" payment
+  // are now real backend calls instead of local state mutation, so at least
+  // the timer and transaction log reflect the truth — and now reflect who
+  // actually did it, since the backend stamps the signed-in user's email.
+  const handlePaymentSuccess = async (_addedSeconds: number, plan: PricingPlan) => {
+    if (!isSignedIn) {
+      setIsPaymentOpen(false);
+      return promptSignIn();
+    }
+    if (!selectedMachineId) {
+      setIsPaymentOpen(false);
+      setCurrentView('machine-select');
+      return;
+    }
     setIsPaymentOpen(false);
-
-    setSession((prev) => {
-      const isExpiredOrZero = prev.remainingSeconds <= 0;
-      const newRemaining = isExpiredOrZero ? addedSeconds : prev.remainingSeconds + addedSeconds;
-      const newTotal = isExpiredOrZero ? addedSeconds : prev.totalDurationSeconds + addedSeconds;
-
-      return {
-        ...prev,
-        plan,
-        status: newRemaining <= 300 ? 'warning' : 'extended',
-        totalDurationSeconds: newTotal,
-        remainingSeconds: newRemaining,
-        extensionCount: isInitialPurchase ? prev.extensionCount : prev.extensionCount + 1,
-      };
-    });
-
-    // Add to transaction log
-    const newTxn: BillingTransaction = {
-      id: 'TXN-' + Math.random().toString(36).substring(2, 9).toUpperCase(),
-      date: 'Just now',
-      description: `${plan.name} (${plan.durationHours} Hours)`,
-      amountInr: plan.priceInr,
-      hoursAdded: plan.durationHours,
-      paymentMethod: 'UPI / NetBanking',
-      status: 'completed',
-      invoiceNumber: `INV-2026-09-${Math.floor(1000 + Math.random() * 9000)}`,
-    };
-
-    setTransactions((prev) => [newTxn, ...prev]);
-
-    // Update user stats
-    setUserProfile((prev) => ({
-      ...prev,
-      totalHoursUsed: prev.totalHoursUsed + plan.durationHours,
-      totalSpentInr: prev.totalSpentInr + plan.priceInr,
-      totalSessionsCompleted: prev.totalSessionsCompleted + (isInitialPurchase ? 1 : 0),
-    }));
-
-    // Enter workspace immediately
-    setCurrentView('workspace');
+    try {
+      const { session: s } = isInitialPurchase
+        ? await startSession(selectedMachineId, plan.id)
+        : await extendSession(selectedMachineId, plan.id);
+      setSession(s);
+      await refreshTransactionsAndStats();
+      setCurrentView('workspace');
+    } catch (err) {
+      console.error('Payment success handler failed to reach backend', err);
+      // Surface this rather than silently pretending it worked — a classmate
+      // should know if the backend call actually failed.
+      alert('Could not update the session on the server. Please try again.');
+    }
   };
 
-  // Demo Simulation Actions
-  const handleSimulateWarning = () => {
-    setSession((prev) => ({
-      ...prev,
-      remainingSeconds: 295, // 4m 55s (under 300s / 5m warning threshold)
-      status: 'warning',
-    }));
+  // Dev-only debug controls. These now mutate the real backend row (guarded
+  // there by NODE_ENV !== 'production') instead of local state, so they
+  // don't get silently overwritten by the next poll tick. The old
+  // "speed multiplier" (1x/10x/60x) control has been removed entirely: it
+  // has no sane server-side equivalent without continuously rewriting
+  // expiresAt, and keeping a UI control that no longer does anything would
+  // be exactly the kind of decorative-fake element this pass is trying to
+  // remove. If WorkspaceHeader.tsx still has a speed-toggle button wired to
+  // onToggleSpeed, remove that button and prop there too.
+  const handleSimulateWarning = async () => {
+    if (!selectedMachineId) return;
+    try {
+      const { session: s } = await debugSession(selectedMachineId, 'warning');
+      setSession(s);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const handleSimulateExpire = () => {
-    setSession((prev) => ({
-      ...prev,
-      remainingSeconds: 0,
-      status: 'expired',
-    }));
+  const handleSimulateExpire = async () => {
+    if (!selectedMachineId) return;
+    try {
+      const { session: s } = await debugSession(selectedMachineId, 'expire');
+      setSession(s);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const handleResetSession = () => {
-    const defaultPlan = PRICING_PLANS[0];
-    setSession({
-      id: 'session-live-' + Math.random().toString(36).substring(2, 6),
-      plan: defaultPlan,
-      status: 'active',
-      startedAt: Date.now(),
-      totalDurationSeconds: defaultPlan.durationSeconds,
-      remainingSeconds: defaultPlan.durationSeconds,
-      extensionCount: 0,
-      ipAddress: '143.244.138.92',
-      region: 'Mumbai, India (ap-south-1)',
-      vmName: 'cloud-vm-mumbai-01',
-    });
-    setSpeedMultiplier(1);
+  const handleResetSession = async () => {
+    if (!selectedMachineId) return;
+    try {
+      const { session: s } = await debugSession(selectedMachineId, 'reset');
+      setSession(s);
+    } catch (err) {
+      console.error(err);
+    }
   };
 
-  const handleToggleSpeed = () => {
-    setSpeedMultiplier((curr) => {
-      if (curr === 1) return 10;
-      if (curr === 10) return 60;
-      return 1;
-    });
-  };
-
-  // File Handlers
   const handleUploadFile = (file: SharedFile) => {
     setSharedFiles((prev) => [file, ...prev]);
   };
@@ -279,62 +346,68 @@ export default function RemoteVMApp() {
     setSharedFiles((prev) => prev.filter((f) => f.id !== fileId));
   };
 
+  // Build the noVNC URL from the runtime-fetched host rather than a
+  // build-time NEXT_PUBLIC_VNC_HOST. Password still travels client-side for
+  // now — see roadmap item 4 (moving it server-side is a separate, bigger
+  // change involving a backend-issued short-lived connection token).
+  const streamUrl = vncHost
+    ? `/novnc/vnc_lite.html?host=${vncHost}&port=443&encrypt=true&autoconnect=true&password=${process.env.NEXT_PUBLIC_VNC_PASSWORD}&resize=scale`
+    : undefined;
+
+  if (isSessionLoading && currentView === 'workspace') {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center">
+        <p className="text-sm text-zinc-400">Loading session…</p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-blue-600 selection:text-white flex flex-col">
-      {/* View Switcher: Landing View vs Workspace View */}
-      {currentView === "landing" ? (
+      {currentView === 'landing' ? (
         <main className="flex-1 flex flex-col">
-          {/* Header */}
           <LandingHeader
-            onOpenWorkspace={() => setCurrentView("workspace")}
+            onOpenWorkspace={() => setCurrentView('workspace')}
             onOpenPricing={() => {
-              const pricingEl = document.getElementById("pricing");
-              pricingEl?.scrollIntoView({ behavior: "smooth" });
+              const pricingEl = document.getElementById('pricing');
+              pricingEl?.scrollIntoView({ behavior: 'smooth' });
             }}
             onOpenDisclaimer={() => {
-              const disclaimerEl =
-                document.getElementById("disclaimer-section");
-              disclaimerEl?.scrollIntoView({ behavior: "smooth" });
+              const disclaimerEl = document.getElementById('disclaimer-section');
+              disclaimerEl?.scrollIntoView({ behavior: 'smooth' });
             }}
-            onOpenAccount={() => setIsAccountOpen(true)}
+            onOpenAccount={() => (isSignedIn ? setIsAccountOpen(true) : setIsAuthModalOpen(true))}
             user={userProfile}
+            isSignedIn={isSignedIn}
           />
 
-          {/* Hero Section */}
           <HeroSection
             onStartSession={handleStartSessionDirect}
             onViewPricing={() => {
-              const pricingEl = document.getElementById("pricing");
-              pricingEl?.scrollIntoView({ behavior: "smooth" });
+              const pricingEl = document.getElementById('pricing');
+              pricingEl?.scrollIntoView({ behavior: 'smooth' });
             }}
           />
 
-          {/* Core Pricing Cards (Featuring ₹100 for 2 Hours) */}
           <PricingCards onSelectPlan={handleSelectPlanFromLanding} />
-
-          {/* Technical Hardware Specs & Features */}
           <FeaturesSection />
 
-          {/* Prominent Mandatory Disclaimers Section */}
           <DisclaimerBanner
             variant="full"
             onAcknowledge={() => setDisclaimerAgreed(!disclaimerAgreed)}
             acknowledged={disclaimerAgreed}
           />
 
-          {/* Landing Footer */}
           <footer className="w-full border-t border-zinc-800/80 bg-zinc-950 py-10 px-4 sm:px-6 lg:px-8 mt-auto">
             <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-zinc-400">
               <div className="flex items-center gap-2">
                 <Terminal className="w-4 h-4 text-blue-400" />
-                <span className="font-bold text-white">
-                  RemoteVM Workspace Service
-                </span>
+                <span className="font-bold text-white">RemoteVM Workspace Service</span>
                 <span>• ₹100 for 2 Hours Standard Compute</span>
               </div>
               <div className="flex items-center gap-4 text-[11px] text-zinc-400">
                 <button
-                  onClick={() => setCurrentView("workspace")}
+                  onClick={() => setCurrentView('workspace')}
                   className="hover:text-blue-400 transition-colors cursor-pointer"
                 >
                   Direct Workspace Access
@@ -345,14 +418,47 @@ export default function RemoteVMApp() {
             </div>
           </footer>
         </main>
+      ) : currentView === 'machine-select' ? (
+        <main className="flex-1 flex flex-col">
+          <MachineSelector onSelect={handleMachineSelected} />
+        </main>
+      ) : !session ? (
+        // No session yet on this backend — send them back to start one
+        // instead of rendering a workspace around a null session.
+        <main className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
+          <p className="text-zinc-300">No active session yet.</p>
+          <button
+            onClick={handleStartSessionDirect}
+            className="px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold cursor-pointer"
+          >
+            Start a Session
+          </button>
+        </main>
       ) : (
-        /* Workspace Active View */
         <main className="flex-1 flex flex-col min-h-screen">
-          {/* Workspace Sticky Topbar with Countdown & Actions */}
+          <div className="px-4 py-1.5 bg-zinc-900 border-b border-zinc-800 flex justify-end">
+            <button
+              onClick={() => {
+                setSelectedMachineId(null);
+                setCurrentView('machine-select');
+              }}
+              className="text-xs text-zinc-400 hover:text-white underline cursor-pointer"
+            >
+              Switch machine
+            </button>
+          </div>
           <WorkspaceHeader
             session={session}
-            speedMultiplier={speedMultiplier}
-            onToggleSpeed={handleToggleSpeed}
+            // TEMPORARY stub props: WorkspaceHeader.tsx still requires these
+            // from the old local-only speed-toggle feature. They're
+            // deliberately disconnected from anything real now — clicking
+            // this button (if it's even still visible) changes a number
+            // nobody reads. The correct fix is deleting the speed-toggle
+            // button and these two props from WorkspaceHeader.tsx directly;
+            // this stub only exists to unblock the TypeScript build until
+            // you do that.
+            speedMultiplier={1}
+            onToggleSpeed={() => {}}
             onSimulateWarning={handleSimulateWarning}
             onSimulateExpire={handleSimulateExpire}
             onResetSession={handleResetSession}
@@ -361,13 +467,12 @@ export default function RemoteVMApp() {
               setPendingPlan(PRICING_PLANS[0]);
               setIsPaymentOpen(true);
             }}
-            onReturnHome={() => setCurrentView("landing")}
+            onReturnHome={() => setCurrentView('landing')}
             onOpenAccount={() => setIsAccountOpen(true)}
             user={userProfile}
           />
 
-          {/* Exactly 5-minute warning banner (shown when remaining <= 300s & > 0) */}
-          {session.status === "warning" && (
+          {session.status === 'warning' && (
             <WarningBanner
               remainingSeconds={session.remainingSeconds}
               onExtend={() => {
@@ -378,9 +483,7 @@ export default function RemoteVMApp() {
             />
           )}
 
-          {/* Main Workspace Body */}
           <div className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col lg:flex-row gap-6">
-            {/* Left/Main Column: The Embedded VM Viewer Panel */}
             <div className="flex-1 flex flex-col space-y-4">
               <VMViewerPanel
                 session={session}
@@ -389,23 +492,19 @@ export default function RemoteVMApp() {
                   setPendingPlan(PRICING_PLANS[0]);
                   setIsPaymentOpen(true);
                 }}
-                streamUrl={`/novnc/vnc_lite.html?host=${process.env.NEXT_PUBLIC_VNC_HOST}&port=443&encrypt=true&autoconnect=true&password=${process.env.NEXT_PUBLIC_VNC_PASSWORD}&resize=scale`}
+                streamUrl={streamUrl}
               />
-
-              {/* Compact Disclaimer under VM panel for rapid reference */}
               <DisclaimerBanner variant="compact" />
             </div>
 
-            {/* Right Column: Shared Ephemeral Files & Notices Panels */}
             <div className="w-full lg:w-96 flex flex-col space-y-4 shrink-0">
-              {/* Tab Selector */}
               <div className="flex items-center bg-zinc-900 rounded-xl p-1 border border-zinc-800 text-xs">
                 <button
-                  onClick={() => setSidebarTab("files")}
+                  onClick={() => setSidebarTab('files')}
                   className={`flex-1 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-                    sidebarTab === "files"
-                      ? "bg-blue-600 text-white shadow-sm"
-                      : "text-zinc-400 hover:text-white"
+                    sidebarTab === 'files'
+                      ? 'bg-blue-600 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
                   }`}
                 >
                   <HardDrive className="w-3.5 h-3.5" />
@@ -413,11 +512,11 @@ export default function RemoteVMApp() {
                 </button>
 
                 <button
-                  onClick={() => setSidebarTab("disclaimer")}
+                  onClick={() => setSidebarTab('disclaimer')}
                   className={`flex-1 py-2 rounded-lg font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-                    sidebarTab === "disclaimer"
-                      ? "bg-amber-600 text-white shadow-sm"
-                      : "text-zinc-400 hover:text-white"
+                    sidebarTab === 'disclaimer'
+                      ? 'bg-amber-600 text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-white'
                   }`}
                 >
                   <Shield className="w-3.5 h-3.5" />
@@ -425,9 +524,8 @@ export default function RemoteVMApp() {
                 </button>
               </div>
 
-              {/* Tab Content */}
               <div className="flex-1">
-                {sidebarTab === "files" && (
+                {sidebarTab === 'files' && (
                   <SharedFilesPanel
                     files={sharedFiles}
                     onUploadFile={handleUploadFile}
@@ -435,12 +533,9 @@ export default function RemoteVMApp() {
                   />
                 )}
 
-                {sidebarTab === "disclaimer" && (
-                  <DisclaimerBanner variant="workspace-sidebar" />
-                )}
+                {sidebarTab === 'disclaimer' && <DisclaimerBanner variant="workspace-sidebar" />}
               </div>
 
-              {/* Node Quick Specs Trigger Card */}
               <div
                 onClick={() => setIsDiagnosticsOpen(true)}
                 className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 transition-all cursor-pointer flex items-center justify-between text-xs"
@@ -448,12 +543,8 @@ export default function RemoteVMApp() {
                 <div className="flex items-center gap-2 text-zinc-300">
                   <Activity className="w-4 h-4 text-emerald-400" />
                   <div>
-                    <div className="font-semibold text-white">
-                      4 vCPU • 8 GB RAM • 50GB SSD
-                    </div>
-                    <div className="text-[11px] text-zinc-400">
-                      Click to inspect node telemetry
-                    </div>
+                    <div className="font-semibold text-white">4 vCPU • 8 GB RAM • 50GB SSD</div>
+                    <div className="text-[11px] text-zinc-400">Click to inspect node telemetry</div>
                   </div>
                 </div>
                 <ArrowRight className="w-4 h-4 text-zinc-400" />
@@ -463,7 +554,6 @@ export default function RemoteVMApp() {
         </main>
       )}
 
-      {/* Payment Upgrade & Start Modal */}
       <ExtendPaymentModal
         isOpen={isPaymentOpen}
         onClose={() => setIsPaymentOpen(false)}
@@ -472,12 +562,11 @@ export default function RemoteVMApp() {
         isInitialPurchase={isInitialPurchase}
       />
 
-      {/* User Account Details Modal */}
       <UserAccountModal
         isOpen={isAccountOpen}
         onClose={() => setIsAccountOpen(false)}
         user={userProfile}
-        session={session}
+        session={session ?? NO_ACTIVE_SESSION_PLACEHOLDER}
         transactions={transactions}
         onOpenExtendPayment={() => {
           setIsAccountOpen(false);
@@ -487,12 +576,13 @@ export default function RemoteVMApp() {
         }}
       />
 
-      {/* Node Diagnostics Modal */}
       <HardwareDiagnosticsModal
         isOpen={isDiagnosticsOpen}
         onClose={() => setIsDiagnosticsOpen(false)}
-        vmIp={session.ipAddress}
+        vmIp={session?.ipAddress ?? ''}
       />
+
+      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
     </div>
   );
 }

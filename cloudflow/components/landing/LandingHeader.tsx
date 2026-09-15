@@ -10,6 +10,7 @@ interface LandingHeaderProps {
   onOpenDisclaimer: () => void;
   onOpenAccount: () => void;
   user: UserProfile;
+  isSignedIn: boolean;
 }
 
 export function LandingHeader({
@@ -18,6 +19,7 @@ export function LandingHeader({
   onOpenDisclaimer,
   onOpenAccount,
   user,
+  isSignedIn,
 }: LandingHeaderProps) {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-zinc-800/80 bg-zinc-950/80 backdrop-blur-xl">
@@ -70,17 +72,29 @@ export function LandingHeader({
 
         {/* Action Button */}
         <div className="flex items-center gap-3">
-          <button
-            id="header-user-account-btn"
-            onClick={onOpenAccount}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-xs font-medium cursor-pointer transition-colors"
-            title="View User Account Details"
-          >
-            <div className="w-6 h-6 rounded-lg bg-blue-600/30 text-blue-400 border border-blue-500/40 flex items-center justify-center font-bold text-[10px]">
-              {user.name.slice(0, 2).toUpperCase()}
-            </div>
-            <span className="hidden sm:inline">{user.email.split('@')[0]}</span>
-          </button>
+          {isSignedIn ? (
+            <button
+              id="header-user-account-btn"
+              onClick={onOpenAccount}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 text-xs font-medium cursor-pointer transition-colors"
+              title="View User Account Details"
+            >
+              <div className="w-6 h-6 rounded-lg bg-blue-600/30 text-blue-400 border border-blue-500/40 flex items-center justify-center font-bold text-[10px]">
+                {user.name.slice(0, 2).toUpperCase()}
+              </div>
+              <span className="hidden sm:inline">{user.email.split('@')[0]}</span>
+            </button>
+          ) : (
+            <button
+              id="header-user-account-btn"
+              onClick={onOpenAccount}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-zinc-900/90 hover:bg-zinc-800 text-zinc-200 hover:text-white border border-zinc-700 text-xs font-semibold cursor-pointer transition-colors"
+              title="Sign in"
+            >
+              <User className="w-3.5 h-3.5 text-blue-400" />
+              <span>Sign in</span>
+            </button>
+          )}
 
           <div className="hidden sm:flex items-center gap-2 text-xs text-zinc-400 bg-zinc-900/90 border border-zinc-800 px-3 py-1.5 rounded-full">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
