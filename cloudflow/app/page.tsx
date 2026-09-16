@@ -23,10 +23,11 @@ import {
   fetchTransactions,
   fetchStats,
   fetchTunnelHost,
+  fetchMyActiveSession,
   debugSession,
 } from '@/lib/api';
 import { useSession } from 'next-auth/react';
-import { AuthModal } from '@/components/auth/AuthModal';
+import { EmailAuthBar } from '@/components/EmailAuthBar';
 import { MachineSelector } from '@/components/MachineSelector';
 import {
   Terminal,
@@ -75,12 +76,37 @@ export default function RemoteVMApp() {
   // machine chosen yet," which routes to the MachineSelector screen.
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null);
 
+  // On sign-in (including a page you never actually navigated to yourself —
+  // a fresh load, a reopened tab, a different device), check whether this
+  // person already has a session running somewhere and jump straight back
+  // into it. Without this, closing the tab mid-rental strands you at the
+  // machine picker with your own machine showing "in use" and no way back
+  // in, since selectedMachineId only ever lived in this component's state.
+  const [hasCheckedForResume, setHasCheckedForResume] = useState(false);
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || hasCheckedForResume) return;
+    setHasCheckedForResume(true);
+    fetchMyActiveSession()
+      .then(({ machineId }) => {
+        if (machineId) {
+          setSelectedMachineId(machineId);
+          setCurrentView('workspace');
+        }
+      })
+      .catch((err) => console.error('Failed to check for a resumable session', err));
+  }, [authStatus, hasCheckedForResume]);
+
+  const [authHighlight, setAuthHighlight] = useState(false);
+
   // Email/password sign-in requires actual typed input, unlike a redirect
-  // flow — there's nothing to programmatically trigger. Instead, open the
-  // real AuthModal so whoever tried to start a session without signing in
-  // can do so right there.
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-  const promptSignIn = () => setIsAuthModalOpen(true);
+  // flow — there's nothing to programmatically trigger. Instead, scroll to
+  // and briefly highlight the always-visible EmailAuthBar so whoever tried
+  // to start a session without signing in notices where to go.
+  const promptSignIn = () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setAuthHighlight(true);
+    setTimeout(() => setAuthHighlight(false), 2500);
+  };
 
   // name/email below now get overwritten by the real signed-in identity once
   // available (see the useEffect further down). joinedDate/accountTier/
@@ -109,8 +135,7 @@ export default function RemoteVMApp() {
     },
   });
 
-  // Once a real signed-in identity exists, overwrite the placeholder name/email
-  // and dismiss the auth modal if it happened to be open.
+  // Once a real signed-in identity exists, overwrite the placeholder name/email.
   useEffect(() => {
     if (authData?.user?.email) {
       setUserProfile((prev) => ({
@@ -118,7 +143,6 @@ export default function RemoteVMApp() {
         name: authData.user.name || prev.name,
         email: authData.user.email,
       }));
-      setIsAuthModalOpen(false);
     }
   }, [authData]);
 
@@ -364,6 +388,12 @@ export default function RemoteVMApp() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-blue-600 selection:text-white flex flex-col">
+      {/* Doesn't require touching LandingHeader.tsx or WorkspaceHeader.tsx
+          (neither was available to edit directly). Fine as a temporary top
+          strip — feel free to fold this into one of those headers properly
+          once you have this working end to end. */}
+      <EmailAuthBar highlight={authHighlight} />
+
       {currentView === 'landing' ? (
         <main className="flex-1 flex flex-col">
           <LandingHeader
@@ -376,9 +406,8 @@ export default function RemoteVMApp() {
               const disclaimerEl = document.getElementById('disclaimer-section');
               disclaimerEl?.scrollIntoView({ behavior: 'smooth' });
             }}
-            onOpenAccount={() => (isSignedIn ? setIsAccountOpen(true) : setIsAuthModalOpen(true))}
+            onOpenAccount={() => setIsAccountOpen(true)}
             user={userProfile}
-            isSignedIn={isSignedIn}
           />
 
           <HeroSection
@@ -581,9 +610,6 @@ export default function RemoteVMApp() {
         onClose={() => setIsDiagnosticsOpen(false)}
         vmIp={session?.ipAddress ?? ''}
       />
-
-      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
     </div>
   );
-  
 }

@@ -54,6 +54,13 @@ export function fetchSession(machineId: string) {
   return req<{ session: any | null }>(`/api/session?machineId=${encodeURIComponent(machineId)}`);
 }
 
+// Finds the signed-in user's own active session, if any, regardless of
+// which machine it's on — used to auto-resume after a closed tab/refresh
+// instead of dropping them back at the machine picker.
+export function fetchMyActiveSession() {
+  return req<{ machineId: string | null; session?: any }>('/api/session/my-active');
+}
+
 export function startSession(machineId: string, planId: string) {
   return req<{ session: any }>('/api/session/start', {
     method: 'POST',
