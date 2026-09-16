@@ -408,6 +408,7 @@ export default function RemoteVMApp() {
             }}
             onOpenAccount={() => setIsAccountOpen(true)}
             user={userProfile}
+            isSignedIn={isSignedIn}
           />
 
           <HeroSection
