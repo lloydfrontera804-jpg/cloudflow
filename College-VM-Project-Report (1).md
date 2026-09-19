@@ -1,6 +1,7 @@
 # College Project Report: Remote AI Workspace (GPT Astra VM Access)
 
 ## 1. What This Project Is
+one
 
 A website that lets classmates remotely control a real laptop over the internet through their browser, use it for a set amount of time, and get warned/locked out when their time is up — with an option to "pay" to extend. This is a **college project for testing among classmates**, not a public commercial service.
 
